@@ -1,0 +1,124 @@
+import { z } from "zod";
+export type TransactionType = "income" | "expense";
+export type PaymentMode = "cash" | "upi" | "card" | "bank_transfer" | "emi" | "other";
+export type EmiDetails = {
+    principal: number;
+    tenureMonths: number;
+    annualInterestRatePercent: number;
+    monthlyInterestRatePercent: number;
+    monthlyEmi: number;
+    totalPayable: number;
+    totalInterest: number;
+    startDate: string;
+    endDate: string;
+    lender?: string;
+};
+export type Transaction = {
+    id: string;
+    type: TransactionType;
+    title: string;
+    amount: number;
+    currency: "INR";
+    category: string;
+    sourceOrMerchant?: string;
+    merchant?: string;
+    total_amount?: number;
+    tax_amount?: number;
+    discount_amount?: number;
+    tip_amount?: number;
+    paymentMode: PaymentMode;
+    date: string;
+    notes?: string;
+    source?: "manual" | "photo" | "screenshot" | "import";
+    raw_extracted_text?: string;
+    gemini_confidence?: number;
+    items?: any[];
+    imageAttachment?: {
+        id: string;
+        filename: string;
+        mimeType: string;
+        localPreviewUrl?: string;
+    };
+    emi?: EmiDetails;
+    createdAt: string;
+    updatedAt: string;
+};
+export type PurchaseDecision = {
+    id: string;
+    productName: string;
+    category: string;
+    price: number;
+    currency: "INR";
+    paymentType: "full" | "emi" | "credit_card" | "loan";
+    emi?: EmiDetails;
+    expectedMonthlyIncome: number;
+    expectedResaleValue: number;
+    expectedMonthlyTimeSavedHours?: number;
+    usageFrequency: "daily" | "weekly" | "monthly" | "rarely";
+    purpose: "business" | "content_creation" | "productivity" | "personal" | "luxury";
+    alreadyOwnSimilar: boolean;
+    canDelay30Days: boolean;
+    emotionalPurchase: "yes" | "maybe" | "no";
+    affordabilityScore: number;
+    usefulnessScore: number;
+    luxuryScore: number;
+    breakEvenMonths?: number;
+    recommendation: "strong_buy" | "buy_carefully" | "wait_30_days" | "avoid" | "business_investment";
+    recommendationReason: string;
+    createdAt: string;
+    updatedAt: string;
+};
+export type FinanceDb = {
+    schemaVersion?: number;
+    appName?: "DriveBackedFinance";
+    version: number;
+    createdAt?: string;
+    updatedAt: string;
+    revision: number;
+    currency?: "INR";
+    userSettings: {
+        currency: "INR";
+        monthlyIncomeTarget?: number;
+        monthlyExpenseLimit?: number;
+        monthlyEmiLimitPercent?: number;
+        savingsTarget?: number;
+        categoryLimits?: Record<string, number>;
+        timezone: "Asia/Kolkata";
+    };
+    transactions: Transaction[];
+    purchaseDecisions: PurchaseDecision[];
+    accounts?: unknown[];
+    budgets?: unknown[];
+    emis?: EmiDetails[];
+    snapshots?: unknown[];
+    recurringTransactions?: unknown[];
+    sync?: {
+        driveFileId?: string | null;
+        lastSyncedAt?: string | null;
+        lastRemoteModifiedAt?: string | null;
+    };
+    categories: {
+        income: string[];
+        expense: string[];
+    };
+    dailySnapshots: {
+        [date: string]: {
+            createdAt: string;
+            transactionCount: number;
+            incomeTotal: number;
+            expenseTotal: number;
+            netTotal: number;
+        };
+    };
+    lastSyncedAt?: string;
+};
+export declare const defaultCategories: {
+    income: string[];
+    expense: string[];
+};
+export declare const createDefaultDb: () => FinanceDb;
+export declare const emiDetailsSchema: z.ZodType<EmiDetails>;
+export declare const transactionSchema: z.ZodType<Transaction>;
+export declare const purchaseDecisionSchema: z.ZodType<PurchaseDecision>;
+export declare const financeDbSchema: z.ZodType<FinanceDb>;
+export type SyncStatus = "not_connected" | "connecting" | "loading" | "creating_database" | "syncing" | "synced" | "unsynced" | "conflict" | "error" | "offline" | "token_expired" | "failed" | "retry_needed" | "recovery";
