@@ -365,8 +365,15 @@ export function ImageImport() {
                <div className="debug-log">
                  <p><b>Endpoint:</b> {debugInfo.url || "/api/extract-transaction"}</p>
                  <p><b>HTTP Status:</b> {debugInfo.status || "N/A"}</p>
+                 <p><b>Content-Type:</b> {debugInfo.contentType || "N/A"}</p>
                  <p><b>Error:</b> {debugInfo.error}</p>
                  <p><b>Details:</b> {debugInfo.details || "None"}</p>
+                 {debugInfo.responsePreview && (
+                   <div>
+                     <p><b>Server response (first 500 chars):</b></p>
+                     <pre style={{fontSize: "11px", whiteSpace: "pre-wrap", wordBreak: "break-all", background: "#f8fafc", padding: "8px", borderRadius: "8px", maxHeight: "200px", overflow: "auto"}}>{debugInfo.responsePreview}</pre>
+                   </div>
+                 )}
                  {prepared && (
                    <>
                      <p><b>File:</b> {prepared.file.name}</p>

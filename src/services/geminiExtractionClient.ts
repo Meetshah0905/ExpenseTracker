@@ -21,6 +21,8 @@ export type ExtractionApiResponse = {
   details?: string;
   status?: number;
   url?: string;
+  contentType?: string;
+  responsePreview?: string;
 };
 
 export async function extractTransactionWithGemini(input: {
@@ -42,29 +44,47 @@ export async function extractTransactionWithGemini(input: {
       signal: controller.signal
     });
 
-    const json = await response.json().catch(() => ({
-      ok: false,
-      error: "The server returned invalid JSON."
-    }));
+    // Read response as text first — never call response.json() directly
+    const responseText = await response.text();
+    const contentType = response.headers.get("content-type") || "";
 
-    if (!response.ok) {
+    // Try to parse JSON safely
+    let payload: any;
+    try {
+      payload = JSON.parse(responseText);
+    } catch (parseError) {
+      console.error("Server returned non-JSON:", responseText.slice(0, 500));
       return {
-        ...json,
         ok: false,
+        error: "The server returned invalid JSON.",
+        details: `Content-Type: ${contentType}`,
         status: response.status,
         url: apiUrl,
-        error: json.error || "Could not reach the scanner API."
+        contentType,
+        responsePreview: responseText.slice(0, 500)
       };
     }
 
-    return json as ExtractionApiResponse;
+    // Server returned parseable JSON but with an error status
+    if (!response.ok || !payload.ok) {
+      return {
+        ok: false,
+        error: payload.error || "Could not scan image.",
+        details: payload.details,
+        status: response.status,
+        url: apiUrl,
+        contentType
+      };
+    }
+
+    return payload as ExtractionApiResponse;
   } catch (err: any) {
     console.error("Fetch error:", err);
-    if (err.name === 'AbortError') {
+    if (err.name === "AbortError") {
       return { ok: false, error: "Scanner request timed out. Try again." };
     }
-    return { 
-      ok: false, 
+    return {
+      ok: false,
       error: "Failed to fetch. If testing locally, run 'npm run dev' so the API proxy is active.",
       details: err.message,
       url: apiUrl

@@ -62,47 +62,62 @@ Use this exact JSON shape:
   "warnings": []
 }`;
 
-export async function extractWithGemini(file: { buffer: Buffer, mimetype: string }, hint: string) {
+function stripMarkdownFences(text: string): string {
+  // Remove ```json ... ``` or ``` ... ``` wrapping
+  let cleaned = text.trim();
+  if (cleaned.startsWith("```")) {
+    // Remove opening fence (with optional language tag)
+    cleaned = cleaned.replace(/^```[a-zA-Z]*\n?/, "");
+    // Remove closing fence
+    cleaned = cleaned.replace(/\n?```\s*$/, "");
+  }
+  return cleaned.trim();
+}
+
+export async function extractWithGemini(file: { buffer: Buffer; mimetype: string }, hint: string) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("Gemini API key is missing on the server.");
   }
 
   const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({ 
+  const model = genAI.getGenerativeModel({
     model: "gemini-1.5-flash",
     generationConfig: {
-      responseMimeType: "application/json",
+      responseMimeType: "application/json"
     }
   });
 
   const base64Image = file.buffer.toString("base64");
 
-  try {
-    const result = await model.generateContent([
-      {
-        text: `${systemPrompt}\n\nUser hint: ${hint}. User currency: INR. Timezone: Asia/Kolkata.`
-      },
-      {
-        inlineData: {
-          mimeType: file.mimetype,
-          data: base64Image
-        }
+  const result = await model.generateContent([
+    {
+      text: `${systemPrompt}\n\nUser hint: ${hint}. User currency: INR. Timezone: Asia/Kolkata.`
+    },
+    {
+      inlineData: {
+        mimeType: file.mimetype,
+        data: base64Image
       }
-    ]);
+    }
+  ]);
 
-    const response = await result.response;
-    let text = response.text();
-    
-    // Cleanup any markdown fences
-    text = text.replace(/```json/g, "").replace(/```/g, "").trim();
-    
-    return {
-      data: JSON.parse(text),
-      rawText: text
-    };
-  } catch (error) {
-    console.error("Gemini Extraction Error:", error);
-    throw error;
+  const response = await result.response;
+  let rawText = response.text();
+
+  // Strip markdown fences before parsing
+  const cleaned = stripMarkdownFences(rawText);
+
+  let data: any;
+  try {
+    data = JSON.parse(cleaned);
+  } catch (parseErr) {
+    console.error("Gemini returned non-JSON text:", cleaned.slice(0, 300));
+    throw new Error(
+      "Gemini returned text that could not be parsed as JSON. Raw start: " +
+        cleaned.slice(0, 200)
+    );
   }
+
+  return { data, rawText: cleaned };
 }

@@ -78,7 +78,7 @@ export async function extractTransactionFromFormData(formData: FormData): Promis
     throw new Error("Gemini API key is missing on the server.");
   }
 
-  const image = formData.get("file"); // Changed from "image" to "file" as requested
+  const image = formData.get("file");
   if (!(image instanceof Blob)) {
     throw new Error("Please choose an image first.");
   }
@@ -93,8 +93,6 @@ export async function extractTransactionFromFormData(formData: FormData): Promis
   }
 
   const hint = String(formData.get("hint") || "unknown");
-  const userCurrency = "INR";
-  const timezone = "Asia/Kolkata";
 
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({ 
@@ -107,35 +105,40 @@ export async function extractTransactionFromFormData(formData: FormData): Promis
   const arrayBuffer = await image.arrayBuffer();
   const base64 = Buffer.from(arrayBuffer).toString("base64");
 
-  try {
-    const result = await model.generateContent([
-      {
-        text: `${systemPrompt}\n\nUser hint: ${hint}. User currency: ${userCurrency}. Timezone: ${timezone}.`
-      },
-      {
-        inlineData: {
-          mimeType: image.type,
-          data: base64
-        }
+  const result = await model.generateContent([
+    {
+      text: `${systemPrompt}\n\nUser hint: ${hint}. User currency: INR. Timezone: Asia/Kolkata.`
+    },
+    {
+      inlineData: {
+        mimeType: image.type,
+        data: base64
       }
-    ]);
-
-    const response = await result.response;
-    let text = response.text();
-    
-    // Strip markdown code fences if Gemini ignores the prompt instruction
-    text = text.replace(/```json/g, "").replace(/```/g, "").trim();
-    
-    const parsed = JSON.parse(text);
-    return {
-      data: extractionResponseSchema.parse(parsed),
-      rawText: text
-    };
-  } catch (error) {
-    console.error("Gemini Extraction Error:", error);
-    if (error instanceof SyntaxError) {
-      throw new Error("The server returned invalid JSON.");
     }
-    throw new Error("Could not read this image. Try a clearer photo.");
+  ]);
+
+  const response = await result.response;
+  let text = response.text();
+  
+  // Strip markdown code fences robustly
+  let cleaned = text.trim();
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```[a-zA-Z]*\n?/, "");
+    cleaned = cleaned.replace(/\n?```\s*$/, "");
+    cleaned = cleaned.trim();
   }
+  
+  let parsed: any;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (parseErr) {
+    console.error("Gemini returned non-JSON:", cleaned.slice(0, 300));
+    throw new Error("Gemini returned text that could not be parsed as JSON.");
+  }
+
+  return {
+    data: extractionResponseSchema.parse(parsed),
+    rawText: cleaned
+  };
 }
+
