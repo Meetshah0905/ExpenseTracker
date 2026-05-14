@@ -1,5 +1,17 @@
 import { create } from "zustand";
-import { supabase } from "../lib/supabase";
+import { isSupabaseConfigured } from "../lib/supabase";
+import {
+  getSession,
+  onAuthStateChange,
+  signInWithEmail as authSignIn,
+  signOut as authSignOut
+} from "../lib/auth";
+import {
+  fetchTransactions,
+  insertTransaction,
+  updateTransactionInDb,
+  deleteTransactionInDb
+} from "../lib/transactions";
 import {
   createDefaultDb,
   type FinanceDb,
@@ -16,11 +28,17 @@ type FinanceState = {
   syncStatus: SyncStatus;
   error?: string;
   isAuthed: boolean;
-  user: any | null;
-  connectAndLoad: () => Promise<void>;
+  userId: string | null;
+  userEmail: string | null;
+  authLoading: boolean;
+
+  // Auth
+  initialize: () => void;
+  signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+
+  // Data
   loadData: () => Promise<void>;
-  loadFromDrive: () => Promise<void>;
   addTransaction: (transaction: Transaction) => Promise<void>;
   updateTransaction: (transaction: Transaction) => Promise<void>;
   deleteTransaction: (id: string) => Promise<void>;
@@ -32,301 +50,240 @@ type FinanceState = {
   closeEmiTransaction: (id: string) => Promise<void>;
   convertDecisionToExpense: (decision: PurchaseDecision) => Promise<void>;
   retrySync: () => Promise<void>;
-  createBackupNow: () => Promise<void>;
   exportJson: () => string;
   importJson: (raw: unknown) => Promise<void>;
-  syncDebug: any;
   setSelectedMonth: (month: string) => void;
-  initialize: () => void;
+  syncDebug: any;
 };
 
 export const useFinanceStore = create<FinanceState>((set, get) => ({
   db: createDefaultDb(),
   selectedMonth: todayIso().slice(0, 7),
   syncStatus: "not_connected",
-  isAuthed: true,
-  user: { id: "local-user" },
+  isAuthed: false,
+  userId: null,
+  userEmail: null,
+  authLoading: true,
 
   initialize: () => {
-    // Local usage, no real auth for now
-    get().loadData();
-  },
-
-  setSelectedMonth: (month) => set({ selectedMonth: month }),
-
-  connectAndLoad: async () => {
-    set({ syncStatus: "connecting", error: undefined });
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: 'google',
-      options: {
-        redirectTo: window.location.origin
+    // Check initial session
+    getSession().then(session => {
+      if (session?.user) {
+        set({
+          isAuthed: true,
+          userId: session.user.id,
+          userEmail: session.user.email || null,
+          authLoading: false
+        });
+        get().loadData();
+      } else {
+        set({ isAuthed: false, userId: null, userEmail: null, authLoading: false });
       }
     });
-    if (error) {
-      set({ syncStatus: "failed", error: error.message });
+
+    // Listen for auth changes (sign in / sign out)
+    onAuthStateChange(session => {
+      if (session?.user) {
+        set({
+          isAuthed: true,
+          userId: session.user.id,
+          userEmail: session.user.email || null,
+          authLoading: false
+        });
+        get().loadData();
+      } else {
+        set({
+          isAuthed: false,
+          userId: null,
+          userEmail: null,
+          authLoading: false,
+          db: createDefaultDb(),
+          syncStatus: "not_connected"
+        });
+      }
+    });
+  },
+
+  signIn: async (email, password) => {
+    set({ authLoading: true, error: undefined });
+    try {
+      await authSignIn(email, password);
+      // onAuthStateChange will handle the rest
+    } catch (err: any) {
+      set({ authLoading: false, error: err.message || "Sign in failed" });
+      throw err;
     }
   },
 
   signOut: async () => {
-    await supabase.auth.signOut();
+    try {
+      await authSignOut();
+      set({
+        isAuthed: false,
+        userId: null,
+        userEmail: null,
+        db: createDefaultDb(),
+        syncStatus: "not_connected"
+      });
+    } catch (err: any) {
+      console.error("Sign out error:", err);
+    }
   },
 
-  loadFromDrive: async () => {
-    await get().loadData();
-  },
+  setSelectedMonth: (month) => set({ selectedMonth: month }),
 
   loadData: async () => {
-    const user = get().user;
-    if (!user) return;
+    if (!isSupabaseConfigured || !get().isAuthed) {
+      set({ syncStatus: "synced" });
+      return;
+    }
 
     set({ syncStatus: "loading" });
     try {
-      // Load Transactions
-      const { data: transactions, error: txError } = await supabase
-        .from('transactions')
-        .select('*')
-        .order('date', { ascending: false });
-
-      if (txError) throw txError;
-
-      // Load Smart Buy Decisions
-      const { data: decisions, error: decError } = await supabase
-        .from('smart_buy_decisions')
-        .select('*')
-        .order('created_at', { ascending: false });
-
-      if (decError) throw decError;
-
-      // Map Supabase data to FinanceDb structure
-      // Note: This is a simplified mapping. We might need more detailed mapping later.
-      const mappedTransactions: Transaction[] = (transactions || []).map(t => ({
-        id: t.id,
-        type: t.type,
-        title: t.title,
-        amount: Number(t.total_amount),
-        currency: t.currency as "INR",
-        category: t.category,
-        sourceOrMerchant: t.merchant,
-        paymentMode: t.payment_mode as any,
-        date: t.date,
-        notes: t.notes,
-        createdAt: t.created_at,
-        updatedAt: t.updated_at,
-        emi: t.is_emi ? calculateEmi({
-          principal: Number(t.amount),
-          tenureMonths: t.emi_months,
-          annualInterestRatePercent: Number(t.emi_interest_rate),
-          startDate: t.date,
-          lender: t.merchant || undefined
-        }) : undefined
-      }));
-
-      const mappedDecisions: PurchaseDecision[] = (decisions || []).map(d => ({
-        id: d.id,
-        productName: d.product_name,
-        category: d.category,
-        price: Number(d.price),
-        currency: "INR",
-        paymentType: "full", // Placeholder
-        expectedMonthlyIncome: 0,
-        expectedResaleValue: 0,
-        usageFrequency: "weekly",
-        purpose: "personal",
-        alreadyOwnSimilar: false,
-        canDelay30Days: false,
-        emotionalPurchase: "no",
-        affordabilityScore: d.affordability_score,
-        usefulnessScore: d.usefulness_score,
-        luxuryScore: d.luxury_score,
-        recommendation: d.recommendation as any,
-        recommendationReason: d.recommendation_reason,
-        createdAt: d.created_at,
-        updatedAt: d.updated_at
-      }));
-
+      const transactions = await fetchTransactions();
       set({
         db: {
           ...get().db,
-          transactions: mappedTransactions,
-          purchaseDecisions: mappedDecisions,
+          transactions,
           updatedAt: new Date().toISOString()
         },
         syncStatus: "synced"
       });
     } catch (error) {
-      set({ syncStatus: "failed", error: error instanceof Error ? error.message : "Failed to load data" });
+      console.error("Load error:", error);
+      set({
+        syncStatus: "failed",
+        error: error instanceof Error ? error.message : "Failed to load data"
+      });
     }
   },
 
   addTransaction: async (transaction) => {
-    set({ syncStatus: "syncing" });
-    try {
-      const { error } = await supabase.from('transactions').insert({
-        id: transaction.id,
-        type: transaction.type,
-        title: transaction.title,
-        merchant: transaction.merchant || transaction.sourceOrMerchant,
-        amount: transaction.emi ? transaction.emi.principal : transaction.amount,
-        total_amount: transaction.total_amount || transaction.amount,
-        tax_amount: transaction.tax_amount || 0,
-        discount_amount: transaction.discount_amount || 0,
-        tip_amount: transaction.tip_amount || 0,
-        date: transaction.date,
-        category: transaction.category,
-        payment_mode: transaction.paymentMode,
-        is_emi: Boolean(transaction.emi),
-        emi_months: transaction.emi?.tenureMonths,
-        emi_interest_rate: transaction.emi?.annualInterestRatePercent,
-        notes: transaction.notes,
-        source: transaction.source || 'manual',
-        raw_extracted_text: transaction.raw_extracted_text,
-        gemini_confidence: transaction.gemini_confidence,
-        items: transaction.items || [],
-        created_at: transaction.createdAt,
-        updated_at: transaction.updatedAt
-      });
+    const { isAuthed, userId } = get();
 
-      if (error) throw error;
-      
+    if (!isAuthed || !userId) {
+      // Not signed in — just add locally but don't persist
       set(state => ({
         db: {
           ...state.db,
-          transactions: [transaction, ...state.db.transactions]
-        },
-        syncStatus: "synced"
+          transactions: [transaction, ...state.db.transactions],
+          updatedAt: new Date().toISOString()
+        }
       }));
+      return;
+    }
+
+    // Optimistic update
+    set(state => ({
+      db: {
+        ...state.db,
+        transactions: [transaction, ...state.db.transactions],
+        updatedAt: new Date().toISOString()
+      },
+      syncStatus: "syncing"
+    }));
+
+    try {
+      await insertTransaction(userId, transaction);
+      set({ syncStatus: "synced" });
     } catch (error) {
-      set({ syncStatus: "failed", error: error instanceof Error ? error.message : "Failed to save transaction" });
+      console.error("Insert error:", error);
+      set({
+        syncStatus: "failed",
+        error: error instanceof Error ? error.message : "Failed to save transaction"
+      });
     }
   },
 
   updateTransaction: async (transaction) => {
-    set({ syncStatus: "syncing" });
+    // Optimistic update
+    set(state => ({
+      db: {
+        ...state.db,
+        transactions: state.db.transactions.map(t =>
+          t.id === transaction.id ? transaction : t
+        ),
+        updatedAt: new Date().toISOString()
+      },
+      syncStatus: "syncing"
+    }));
+
+    if (!get().isAuthed) {
+      set({ syncStatus: "synced" });
+      return;
+    }
+
     try {
-      const { error } = await supabase.from('transactions').update({
-        type: transaction.type,
-        title: transaction.title,
-        merchant: transaction.sourceOrMerchant,
-        amount: transaction.emi ? transaction.emi.principal : transaction.amount,
-        total_amount: transaction.amount,
-        date: transaction.date,
-        category: transaction.category,
-        payment_mode: transaction.paymentMode,
-        is_emi: Boolean(transaction.emi),
-        emi_months: transaction.emi?.tenureMonths,
-        emi_interest_rate: transaction.emi?.annualInterestRatePercent,
-        notes: transaction.notes,
-        updated_at: new Date().toISOString()
-      }).eq('id', transaction.id);
-
-      if (error) throw error;
-
-      set(state => ({
-        db: {
-          ...state.db,
-          transactions: state.db.transactions.map(t => t.id === transaction.id ? transaction : t)
-        },
-        syncStatus: "synced"
-      }));
+      await updateTransactionInDb(transaction);
+      set({ syncStatus: "synced" });
     } catch (error) {
-      set({ syncStatus: "failed", error: error instanceof Error ? error.message : "Failed to update transaction" });
+      console.error("Update error:", error);
+      set({
+        syncStatus: "failed",
+        error: error instanceof Error ? error.message : "Failed to update transaction"
+      });
     }
   },
 
   deleteTransaction: async (id) => {
-    set({ syncStatus: "syncing" });
-    try {
-      const { error } = await supabase.from('transactions').delete().eq('id', id);
-      if (error) throw error;
+    // Optimistic delete
+    set(state => ({
+      db: {
+        ...state.db,
+        transactions: state.db.transactions.filter(t => t.id !== id),
+        updatedAt: new Date().toISOString()
+      },
+      syncStatus: "syncing"
+    }));
 
-      set(state => ({
-        db: {
-          ...state.db,
-          transactions: state.db.transactions.filter(t => t.id !== id)
-        },
-        syncStatus: "synced"
-      }));
+    if (!get().isAuthed) {
+      set({ syncStatus: "synced" });
+      return;
+    }
+
+    try {
+      await deleteTransactionInDb(id);
+      set({ syncStatus: "synced" });
     } catch (error) {
-      set({ syncStatus: "failed", error: error instanceof Error ? error.message : "Failed to delete transaction" });
+      console.error("Delete error:", error);
+      set({
+        syncStatus: "failed",
+        error: error instanceof Error ? error.message : "Failed to delete transaction"
+      });
     }
   },
 
+  // Purchase decisions — local only (no Supabase table yet)
   addPurchaseDecision: async (decision) => {
-    set({ syncStatus: "syncing" });
-    try {
-      const { error } = await supabase.from('smart_buy_decisions').insert({
-        id: decision.id,
-        product_name: decision.productName,
-        category: decision.category,
-        price: decision.price,
-        recommendation: decision.recommendation,
-        recommendation_reason: decision.recommendationReason,
-        affordability_score: decision.affordabilityScore,
-        usefulness_score: decision.usefulnessScore,
-        luxury_score: decision.luxuryScore,
-        created_at: decision.createdAt,
-        updated_at: decision.updatedAt
-      });
-
-      if (error) throw error;
-
-      set(state => ({
-        db: {
-          ...state.db,
-          purchaseDecisions: [decision, ...state.db.purchaseDecisions]
-        },
-        syncStatus: "synced"
-      }));
-    } catch (error) {
-      set({ syncStatus: "failed", error: error instanceof Error ? error.message : "Failed to save decision" });
-    }
+    set(state => ({
+      db: {
+        ...state.db,
+        purchaseDecisions: [decision, ...state.db.purchaseDecisions],
+        updatedAt: new Date().toISOString()
+      }
+    }));
   },
 
   updatePurchaseDecision: async (decision) => {
-    set({ syncStatus: "syncing" });
-    try {
-      const { error } = await supabase.from('smart_buy_decisions').update({
-        product_name: decision.productName,
-        category: decision.category,
-        price: decision.price,
-        recommendation: decision.recommendation,
-        recommendation_reason: decision.recommendationReason,
-        affordability_score: decision.affordabilityScore,
-        usefulness_score: decision.usefulnessScore,
-        luxury_score: decision.luxuryScore,
-        updated_at: new Date().toISOString()
-      }).eq('id', decision.id);
-
-      if (error) throw error;
-
-      set(state => ({
-        db: {
-          ...state.db,
-          purchaseDecisions: state.db.purchaseDecisions.map(d => d.id === decision.id ? decision : d)
-        },
-        syncStatus: "synced"
-      }));
-    } catch (error) {
-      set({ syncStatus: "failed", error: error instanceof Error ? error.message : "Failed to update decision" });
-    }
+    set(state => ({
+      db: {
+        ...state.db,
+        purchaseDecisions: state.db.purchaseDecisions.map(d =>
+          d.id === decision.id ? decision : d
+        ),
+        updatedAt: new Date().toISOString()
+      }
+    }));
   },
 
   deletePurchaseDecision: async (id) => {
-    set({ syncStatus: "syncing" });
-    try {
-      const { error } = await supabase.from('smart_buy_decisions').delete().eq('id', id);
-      if (error) throw error;
-
-      set(state => ({
-        db: {
-          ...state.db,
-          purchaseDecisions: state.db.purchaseDecisions.filter(d => d.id !== id)
-        },
-        syncStatus: "synced"
-      }));
-    } catch (error) {
-      set({ syncStatus: "failed", error: error instanceof Error ? error.message : "Failed to delete decision" });
-    }
+    set(state => ({
+      db: {
+        ...state.db,
+        purchaseDecisions: state.db.purchaseDecisions.filter(d => d.id !== id),
+        updatedAt: new Date().toISOString()
+      }
+    }));
   },
 
   updateEmiTransaction: async (transaction) => {
@@ -367,7 +324,7 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
       amount: decision.price,
       currency: "INR",
       category: decision.category || "Other Expense",
-      paymentMode: "card", // Placeholder
+      paymentMode: "card",
       date: now.slice(0, 10),
       notes: `Converted from Smart Buy: ${decision.recommendationReason}`,
       createdAt: now,
@@ -379,21 +336,23 @@ export const useFinanceStore = create<FinanceState>((set, get) => ({
     await get().loadData();
   },
 
-  createBackupNow: async () => {
-    console.log("Backup to Drive not yet implemented with Supabase.");
-  },
-
   exportJson: () => JSON.stringify(get().db, null, 2),
 
   importJson: async (raw) => {
-    console.log("Import not yet implemented with Supabase.");
+    const data = raw as any;
+    if (data && data.transactions) {
+      set(state => ({
+        db: {
+          ...state.db,
+          transactions: data.transactions,
+          purchaseDecisions: data.purchaseDecisions || state.db.purchaseDecisions,
+          updatedAt: new Date().toISOString()
+        }
+      }));
+    }
   },
 
   syncDebug: {
-    googleConnected: false,
-    tokenAvailable: false,
-    clientIdConfigured: false,
-    dbFileFound: false,
-    transactionCount: 0
+    supabaseConfigured: isSupabaseConfigured
   }
 }));

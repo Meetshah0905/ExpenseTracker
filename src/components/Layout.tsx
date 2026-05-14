@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import type { Page } from "../App";
 import { BottomNav } from "./BottomNav";
-
+import { AuthBadge } from "./AuthBadge";
 
 export function Layout({ children, page, onNavigate }: { children: ReactNode; page: Page; onNavigate: (page: Page) => void }) {
   return (
@@ -12,10 +12,7 @@ export function Layout({ children, page, onNavigate }: { children: ReactNode; pa
             <h1>Finance</h1>
             <p className="subtitle">Track spending, income, EMI, and smart purchases.</p>
           </div>
-          <div className="status-badge">
-            <span className="dot"></span>
-            AI receipt scanner enabled
-          </div>
+          <AuthBadge />
         </div>
       </header>
       <main className="content">
